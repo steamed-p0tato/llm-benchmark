@@ -247,6 +247,9 @@ except ImportError as e:
                 "protobuf>=4.25.0",
                 "safetensors>=0.4.0",
                 "tokenizers>=0.15.0",
+                "numba>=0.59.0",
+                "numpy>=1.24.0", 
+                "psutil>=5.9.0",
             ]
             
             # Add bitsandbytes only for CUDA systems (not Mac)
