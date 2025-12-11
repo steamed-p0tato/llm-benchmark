@@ -10,8 +10,8 @@ import sys
 import json
 import time
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Callable, Optional, List
+from dataclasses import dataclass
+from typing import Callable, Optional
 import tempfile
 import os
 import platform
@@ -40,32 +40,16 @@ class GPUBenchmarkResult:
     memory_total_gb: float
     success: bool
     error_message: str = ""
-    backend: str = "unknown"  # cuda, mps, or cpu
+    backend: str = "unknown"
 
 
 class LLMBenchmark:
     """GPU Benchmark using LLM inference"""
     
-    # Models to try (in order of preference)
-    # Gated models first (now accessible with token), then open models
-    MODEL_OPTIONS_GATED = [
-        "meta-llama/Llama-3.2-1B-Instruct",   # 1B - good balance
-        "meta-llama/Llama-3.2-3B-Instruct",   # 3B - if enough VRAM
-        "google/gemma-2-2b-it",                # 2B - gated but good
-    ]
-    
-    MODEL_OPTIONS_OPEN = [
-        "Qwen/Qwen2.5-1.5B-Instruct",         # 1.5B - open, good quality
-        "Qwen/Qwen2.5-0.5B-Instruct",         # 0.5B - smaller fallback
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", # 1.1B - very compatible
-        "microsoft/DialoGPT-medium",           # Smaller, very compatible
-        "gpt2-medium",                         # Fallback - always works
-    ]
-    
-    # Larger models for high VRAM systems
-    LARGE_MODELS = [
-        "meta-llama/Llama-3.1-8B-Instruct",   # 8B - needs 16GB+ VRAM
-        "meta-llama/Llama-3.2-3B-Instruct",   # 3B - needs 8GB+ VRAM
+    # Only these two models - no fallback
+    MODELS = [
+        "google/gemma-3-27b-it",      # Gemma 3 27B - gated, needs license
+        "Qwen/Qwen2.5-32B-Instruct",  # Qwen 2.5 32B - open
     ]
     
     BENCHMARK_PROMPT = (
@@ -85,7 +69,6 @@ class LLMBenchmark:
         log_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[float], None]] = None
     ):
-        """Set callback functions"""
         self.log_callback = log_callback
         self.progress_callback = progress_callback
         
@@ -100,24 +83,24 @@ class LLMBenchmark:
             self.progress_callback(progress)
     
     def get_python_path(self) -> str:
-        """Get the path to Python in the virtual environment"""
         if sys.platform == "win32":
             return str(self.venv_path / "Scripts" / "python.exe")
         return str(self.venv_path / "bin" / "python")
     
     def run_benchmark(self, model_id: Optional[str] = None) -> GPUBenchmarkResult:
-        """Run the GPU benchmark using LLM inference"""
+        """Run the GPU benchmark"""
         
         self._log("=" * 60)
         self._log("GPU BENCHMARK - LLM Inference")
         self._log("=" * 60)
+        self._log("Models: Gemma 3 27B / Qwen 2.5 32B")
+        self._log("Requires ~40-60GB VRAM")
+        self._log("")
         
         self._update_progress(0.1)
         
-        # Create the benchmark script
         benchmark_script = self._create_benchmark_script(model_id)
         
-        # Write to temp file
         with tempfile.NamedTemporaryFile(
             mode='w', 
             suffix='.py', 
@@ -128,21 +111,17 @@ class LLMBenchmark:
             script_path = f.name
         
         try:
-            self._log("Detecting hardware acceleration...")
-            self._log("Starting benchmark (this may take several minutes)...")
-            self._log("Downloading model if not cached...")
+            self._log("Starting benchmark...")
             self._update_progress(0.2)
             
-            # Run the benchmark script with HF token in environment
             env = os.environ.copy()
             env['HF_HOME'] = str(Path.home() / '.cache' / 'huggingface')
             env['TOKENIZERS_PARALLELISM'] = 'false'
             env['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
             
-            # Add Hugging Face token for gated repos
             if self.hf_token:
                 env['HF_TOKEN'] = self.hf_token
-                env['HUGGING_FACE_HUB_TOKEN'] = self.hf_token  # Alternative env var
+                env['HUGGING_FACE_HUB_TOKEN'] = self.hf_token
             
             process = subprocess.Popen(
                 [self.get_python_path(), script_path],
@@ -153,10 +132,8 @@ class LLMBenchmark:
                 bufsize=1
             )
             
-            # Collect output
             stdout_lines = []
             
-            # Read output in real-time
             for line in iter(process.stdout.readline, ''):
                 line = line.strip()
                 if not line:
@@ -172,26 +149,21 @@ class LLMBenchmark:
                         pass
                 elif line.startswith("LOG:"):
                     self._log(line[4:].strip())
-                elif line.startswith("RESULT:"):
-                    pass  # Will parse at the end
                 elif not line.startswith(("PROGRESS:", "LOG:", "RESULT:")):
-                    # Log other output for debugging
                     if "error" in line.lower() or "warning" in line.lower():
                         self._log(f"  {line[:100]}")
             
             process.wait()
-            
             self._update_progress(0.95)
             
-            # Parse results
             result_json = None
             for line in stdout_lines:
                 if line.startswith("RESULT:"):
                     try:
                         result_json = json.loads(line[7:])
                         break
-                    except json.JSONDecodeError as e:
-                        self._log(f"Failed to parse result: {e}")
+                    except json.JSONDecodeError:
+                        pass
             
             if result_json and result_json.get("success"):
                 result = GPUBenchmarkResult(
@@ -227,10 +199,8 @@ class LLMBenchmark:
                 self._log("=" * 60)
                 
             else:
-                error_msg = result_json.get("error", "Unknown error") if result_json else "Failed to parse results"
-                
-                # Show last few lines of output for debugging
-                self._log(f"✗ Benchmark failed: {error_msg[:200]}")
+                error_msg = result_json.get("error", "Unknown error") if result_json else "Failed to run benchmark"
+                self._log(f"✗ Benchmark failed: {error_msg}")
                 
                 result = GPUBenchmarkResult(
                     model_name="Unknown",
@@ -255,22 +225,18 @@ class LLMBenchmark:
             return result
             
         finally:
-            # Clean up temp file
             try:
                 os.unlink(script_path)
             except:
                 pass
     
     def _create_benchmark_script(self, model_id: Optional[str] = None) -> str:
-        """Create the benchmark script to run in the venv"""
+        """Create the benchmark script"""
         
-        model_options_gated_str = json.dumps(self.MODEL_OPTIONS_GATED)
-        model_options_open_str = json.dumps(self.MODEL_OPTIONS_OPEN)
-        large_models_str = json.dumps(self.LARGE_MODELS)
+        models_str = json.dumps(self.MODELS)
         
         return f'''#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""GPU Benchmark Script - Runs inside the benchmark venv"""
+"""GPU Benchmark Script"""
 
 import json
 import time
@@ -280,7 +246,6 @@ import platform
 import warnings
 import os
 
-# Suppress warnings
 warnings.filterwarnings("ignore")
 
 def log(msg):
@@ -293,23 +258,19 @@ def result(data):
     print(f"RESULT: {{json.dumps(data)}}", flush=True)
 
 def setup_hf_auth():
-    """Setup Hugging Face authentication from environment"""
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         try:
             from huggingface_hub import login
             login(token=token, add_to_git_credential=False)
-            log("Authenticated with Hugging Face Hub")
+            log("Authenticated with Hugging Face")
             return token
         except Exception as e:
-            log(f"HF auth warning: {{str(e)[:50]}}")
+            log(f"Auth warning: {{str(e)[:50]}}")
             return token
-    else:
-        log("No HF token found - gated models may not be accessible")
-        return None
+    return None
 
 def get_device_info():
-    """Detect available hardware acceleration"""
     import torch
     
     info = {{
@@ -319,21 +280,30 @@ def get_device_info():
         "memory_total": 0,
     }}
     
-    # Check for CUDA (NVIDIA)
     if torch.cuda.is_available():
         info["backend"] = "cuda"
         info["device"] = "cuda"
         info["name"] = torch.cuda.get_device_name(0)
         info["memory_total"] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         info["cuda_version"] = torch.version.cuda
+        
+        # Check multi-GPU
+        gpu_count = torch.cuda.device_count()
+        if gpu_count > 1:
+            info["gpu_count"] = gpu_count
+            total_mem = sum(
+                torch.cuda.get_device_properties(i).total_memory 
+                for i in range(gpu_count)
+            ) / (1024**3)
+            info["memory_total"] = total_mem
+            log(f"Detected {{gpu_count}} GPUs, total {{total_mem:.1f}}GB VRAM")
+        
         return info
     
-    # Check for MPS (Apple Silicon)
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         info["backend"] = "mps"
         info["device"] = "mps"
         info["name"] = "Apple Silicon (MPS)"
-        # Get Mac memory info
         try:
             import subprocess
             result = subprocess.run(
@@ -346,72 +316,92 @@ def get_device_info():
             pass
         return info
     
-    # CPU fallback
     info["name"] = platform.processor() or "CPU"
     return info
 
-def try_load_model(model_id, device, backend, hf_token=None):
-    """Try to load a model with proper error handling"""
+def load_model(model_id, device_info, hf_token=None):
+    """Load model with appropriate settings for large models"""
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     
-    log(f"Attempting to load: {{model_id}}")
+    backend = device_info["backend"]
+    device = device_info["device"]
+    available_memory = device_info["memory_total"]
     
-    # Common kwargs for authenticated requests
+    log(f"Loading {{model_id}}...")
+    log(f"Available memory: {{available_memory:.1f}}GB")
+    
     auth_kwargs = {{"token": hf_token}} if hf_token else {{}}
     
-    # Load tokenizer first
+    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_id,
         trust_remote_code=True,
-        padding_side="left",
         **auth_kwargs
     )
     
-    # Ensure pad token exists
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Determine dtype
-    if backend == "mps":
-        dtype = torch.float16
-    elif backend == "cuda":
-        dtype = torch.float16
-    else:
-        dtype = torch.float32
-    
-    # Load model configuration first to check compatibility
-    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True, **auth_kwargs)
-    
-    # Load model
+    # Determine loading strategy based on available memory
     load_kwargs = {{
         "trust_remote_code": True,
-        "torch_dtype": dtype,
         "low_cpu_mem_usage": True,
         **auth_kwargs
     }}
     
-    # For CUDA, try device_map auto
     if backend == "cuda":
-        load_kwargs["device_map"] = "auto"
+        # For 27B/32B models, we need careful memory management
+        if available_memory >= 80:
+            # Plenty of VRAM - use float16
+            log("Using float16 (full precision)")
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+        elif available_memory >= 48:
+            # Use bfloat16 if available
+            log("Using bfloat16")
+            load_kwargs["torch_dtype"] = torch.bfloat16
+            load_kwargs["device_map"] = "auto"
+        elif available_memory >= 32:
+            # Use 8-bit quantization
+            log("Using 8-bit quantization (load_in_8bit)")
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+            load_kwargs["load_in_8bit"] = True
+        else:
+            # Use 4-bit quantization
+            log("Using 4-bit quantization (load_in_4bit)")
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+            load_kwargs["load_in_4bit"] = True
+            load_kwargs["bnb_4bit_compute_dtype"] = torch.float16
     
+    elif backend == "mps":
+        # Apple Silicon
+        if available_memory >= 64:
+            load_kwargs["torch_dtype"] = torch.float16
+        else:
+            log("Warning: May need 64GB+ unified memory for these models")
+            load_kwargs["torch_dtype"] = torch.float16
+    
+    else:
+        load_kwargs["torch_dtype"] = torch.float32
+    
+    # Load model
     model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
     
-    # Move to device if needed (for MPS)
-    if backend == "mps":
+    # Move to device if needed (MPS)
+    if backend == "mps" and not hasattr(model, "hf_device_map"):
         model = model.to("mps")
-    elif backend == "cpu":
-        model = model.to("cpu")
     
     model.eval()
     
     return model, tokenizer
 
 def run_generation(model, tokenizer, prompt, device, backend, max_new_tokens=256):
-    """Run text generation with compatibility handling"""
     import torch
     
-    # Format prompt for chat models if applicable
+    # Format prompt
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
         try:
             messages = [{{"role": "user", "content": prompt}}]
@@ -420,25 +410,29 @@ def run_generation(model, tokenizer, prompt, device, backend, max_new_tokens=256
                 tokenize=False, 
                 add_generation_prompt=True
             )
-        except Exception:
+        except:
             formatted_prompt = prompt
     else:
         formatted_prompt = prompt
     
-    # Tokenize
     inputs = tokenizer(
         formatted_prompt, 
         return_tensors="pt",
         padding=True,
         truncation=True,
-        max_length=1024
+        max_length=2048
     )
     
     # Move to device
-    inputs = {{k: v.to(device) for k, v in inputs.items()}}
+    if hasattr(model, "hf_device_map"):
+        # Model is already distributed
+        inputs = {{k: v.to(model.device) for k, v in inputs.items()}}
+        device = model.device
+    else:
+        inputs = {{k: v.to(device) for k, v in inputs.items()}}
+    
     prompt_tokens = inputs["input_ids"].shape[1]
     
-    # Generation config - use simple settings for compatibility
     gen_kwargs = {{
         "max_new_tokens": max_new_tokens,
         "do_sample": True,
@@ -446,37 +440,21 @@ def run_generation(model, tokenizer, prompt, device, backend, max_new_tokens=256
         "top_p": 0.9,
         "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
         "eos_token_id": tokenizer.eos_token_id,
-        "use_cache": True,  # Enable KV cache
+        "use_cache": True,
     }}
     
-    # Synchronize before timing
+    # Sync before timing
     if backend == "cuda":
         torch.cuda.synchronize()
     elif backend == "mps":
         torch.mps.synchronize()
     
-    # Generate
     start_time = time.perf_counter()
     
     with torch.no_grad():
-        try:
-            outputs = model.generate(
-                **inputs,
-                **gen_kwargs
-            )
-        except Exception as e:
-            # If cache fails, try without cache
-            if "cache" in str(e).lower() or "seen_token" in str(e).lower():
-                log("Cache issue detected, retrying without cache...")
-                gen_kwargs["use_cache"] = False
-                outputs = model.generate(
-                    **inputs,
-                    **gen_kwargs
-                )
-            else:
-                raise
+        outputs = model.generate(**inputs, **gen_kwargs)
     
-    # Synchronize after generation
+    # Sync after
     if backend == "cuda":
         torch.cuda.synchronize()
     elif backend == "mps":
@@ -484,7 +462,6 @@ def run_generation(model, tokenizer, prompt, device, backend, max_new_tokens=256
     
     end_time = time.perf_counter()
     
-    # Decode
     generated_ids = outputs[0][prompt_tokens:]
     response = tokenizer.decode(generated_ids, skip_special_tokens=True)
     
@@ -505,17 +482,12 @@ try:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     
-    # Disable gradient computation globally
     torch.set_grad_enabled(False)
     
     progress(0.12)
-    
-    # Setup HF authentication
     hf_token = setup_hf_auth()
     
     progress(0.15)
-    
-    # Detect device
     device_info = get_device_info()
     backend = device_info["backend"]
     device = device_info["device"]
@@ -523,81 +495,47 @@ try:
     log(f"Backend: {{backend.upper()}}")
     log(f"Device: {{device_info['name']}}")
     if device_info.get("cuda_version"):
-        log(f"CUDA Version: {{device_info['cuda_version']}}")
-    if device_info["memory_total"] > 0:
-        log(f"Memory: {{device_info['memory_total']:.1f}} GB")
+        log(f"CUDA: {{device_info['cuda_version']}}")
+    log(f"Memory: {{device_info['memory_total']:.1f}} GB")
     
     progress(0.2)
     
-    # Model options
-    model_options_gated = {model_options_gated_str}
-    model_options_open = {model_options_open_str}
-    large_models = {large_models_str}
-    requested_model = {repr(model_id) if model_id else 'None'}
+    # Models to try (only these two)
+    models = {models_str}
+    requested = {repr(model_id) if model_id else 'None'}
+    
+    if requested:
+        models = [requested]
     
     model = None
     tokenizer = None
     used_model_id = None
     
-    # Build model list based on available resources
-    models_to_try = []
-    
-    # If specific model requested, try it first
-    if requested_model:
-        models_to_try.append(requested_model)
-    
-    # Add models based on backend and available memory
-    available_memory = device_info["memory_total"]
-    
-    if backend == "cuda":
-        if available_memory >= 16:
-            # Plenty of VRAM - try larger models first
-            models_to_try.extend(large_models)
-            models_to_try.extend(model_options_gated)
-        elif available_memory >= 8:
-            # Moderate VRAM - use medium models
-            models_to_try.extend(model_options_gated)
-        else:
-            # Limited VRAM - use smaller models
-            models_to_try.extend(model_options_gated[:1])  # Just the 1B model
-    elif backend == "mps":
-        # Apple Silicon - unified memory, try gated models
-        if available_memory >= 16:
-            models_to_try.extend(model_options_gated)
-        else:
-            models_to_try.extend(model_options_gated[:1])
-    
-    # Always add open models as fallback
-    models_to_try.extend(model_options_open)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    models_to_try = [x for x in models_to_try if not (x in seen or seen.add(x))]
-    
-    log(f"Will try {{len(models_to_try)}} models in order of preference")
-    
-    for model_id in models_to_try:
+    for model_id in models:
         try:
-            log(f"Trying model: {{model_id}}")
-            model, tokenizer = try_load_model(model_id, device, backend, hf_token)
+            log(f"Trying: {{model_id}}")
+            model, tokenizer = load_model(model_id, device_info, hf_token)
             used_model_id = model_id
-            log(f"Successfully loaded: {{model_id}}")
+            log(f"Loaded: {{model_id}}")
             break
         except Exception as e:
             error_str = str(e)
             if "gated" in error_str.lower() or "access" in error_str.lower():
-                log(f"Access denied for {{model_id}} - need to accept license on HF Hub")
-            elif "401" in error_str or "403" in error_str:
-                log(f"Authentication failed for {{model_id}}")
+                log(f"GATED: Accept license at huggingface.co/{{model_id}}")
+            elif "memory" in error_str.lower() or "oom" in error_str.lower():
+                log(f"OUT OF MEMORY: Need more VRAM for {{model_id}}")
             else:
-                log(f"Failed to load {{model_id}}: {{error_str[:100]}}")
+                log(f"Failed: {{error_str[:100]}}")
             continue
     
     if model is None:
-        raise RuntimeError("Could not load any model")
+        raise RuntimeError(
+            "Could not load Gemma 3 27B or Qwen 2.5 32B. "
+            "Ensure you have enough VRAM (32GB+ recommended) and "
+            "have accepted the license for Gemma at huggingface.co"
+        )
     
     progress(0.6)
-    log("Model loaded successfully")
     
     # Clear memory
     gc.collect()
@@ -607,42 +545,35 @@ try:
     elif backend == "mps":
         torch.mps.empty_cache()
     
-    # Prepare prompt
     prompt = """{self.BENCHMARK_PROMPT}"""
     
     progress(0.7)
     
-    # Warm-up run
+    # Warm-up
     log("Warming up...")
     try:
-        warmup_result = run_generation(model, tokenizer, "Hello", device, backend, max_new_tokens=10)
+        _ = run_generation(model, tokenizer, "Hi", device, backend, max_new_tokens=5)
     except Exception as e:
-        log(f"Warmup issue (continuing): {{str(e)[:50]}}")
+        log(f"Warmup note: {{str(e)[:50]}}")
     
     gc.collect()
     if backend == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
-    elif backend == "mps":
-        torch.mps.empty_cache()
     
     progress(0.75)
     
-    # Actual benchmark
-    log("Running benchmark generation...")
+    # Benchmark
+    log("Running benchmark...")
     gen_result = run_generation(model, tokenizer, prompt, device, backend, max_new_tokens=256)
     
     progress(0.9)
     
-    # Calculate metrics
     total_time = gen_result["time"]
     generated_tokens = gen_result["generated_tokens"]
     tokens_per_second = generated_tokens / total_time if total_time > 0 else 0
     
-    # Get memory stats
     memory_used = 0
-    memory_total = device_info["memory_total"]
-    
     if backend == "cuda":
         memory_used = torch.cuda.max_memory_allocated() / (1024**3)
     elif backend == "mps":
@@ -651,8 +582,8 @@ try:
         except:
             pass
     
-    log(f"Generation complete: {{generated_tokens}} tokens in {{total_time:.2f}}s")
-    log(f"Tokens/second: {{tokens_per_second:.2f}}")
+    log(f"Complete: {{generated_tokens}} tokens in {{total_time:.2f}}s")
+    log(f"Speed: {{tokens_per_second:.2f}} tok/s")
     
     progress(1.0)
     
@@ -660,7 +591,7 @@ try:
         "success": True,
         "model_name": used_model_id,
         "backend": backend,
-        "response": gen_result["response"][:1000],
+        "response": gen_result["response"][:1500],
         "total_tokens": gen_result["total_tokens"],
         "prompt_tokens": gen_result["prompt_tokens"],
         "generated_tokens": generated_tokens,
@@ -671,22 +602,21 @@ try:
         "generation_time": total_time,
         "gpu_info": device_info,
         "memory_used_gb": memory_used,
-        "memory_total_gb": memory_total,
+        "memory_total_gb": device_info["memory_total"],
     }})
 
 except Exception as e:
     import traceback
     error_msg = str(e)
-    tb = traceback.format_exc()
+    log(f"Error: {{error_msg}}")
     result({{
         "success": False,
-        "error": f"{{error_msg}}"
+        "error": error_msg
     }})
 '''
 
 
 if __name__ == "__main__":
-    # Test run
     from pathlib import Path
     venv_path = Path("benchmark")
     if venv_path.exists():
