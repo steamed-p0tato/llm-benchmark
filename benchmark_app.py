@@ -6,10 +6,12 @@ A comprehensive CPU and GPU benchmarking tool using Textual
 
 import os
 import sys
+import json
 import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+import platform
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical, ScrollableContainer, Center
@@ -27,6 +29,10 @@ from textual.reactive import reactive
 from venv_manager import VenvManager
 from cpu_benchmark import MandelbrotBenchmark, CPUBenchmarkResult
 from gpu_benchmark import LLMBenchmark, GPUBenchmarkResult
+
+
+# Results directory
+RESULTS_DIR = Path(__file__).parent / "benchmark_results"
 
 
 # Styles
@@ -110,7 +116,7 @@ Screen {
 }
 
 .action-button {
-    min-width: 24;
+    min-width: 20;
 }
 
 #venv-button {
@@ -127,6 +133,10 @@ Screen {
 
 #results-button {
     background: $accent;
+}
+
+#save-button {
+    background: $secondary;
 }
 
 #log-container {
@@ -272,6 +282,206 @@ DataTable {
     display: none;
 }
 """
+
+
+class ResultsLogger:
+    """Handles saving benchmark results to files"""
+    
+    def __init__(self, results_dir: Path = RESULTS_DIR):
+        self.results_dir = results_dir
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+    
+    def get_system_info(self) -> dict:
+        """Gather system information"""
+        return {
+            "hostname": platform.node(),
+            "platform": platform.platform(),
+            "system": platform.system(),
+            "release": platform.release(),
+            "version": platform.version(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "python_version": platform.python_version(),
+        }
+    
+    def format_results_text(
+        self, 
+        cpu_result: Optional[CPUBenchmarkResult] = None,
+        gpu_result: Optional[GPUBenchmarkResult] = None,
+        timestamp: Optional[datetime] = None
+    ) -> str:
+        """Format results as human-readable text"""
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        lines = []
+        lines.append("=" * 70)
+        lines.append("SYSTEM BENCHMARK RESULTS")
+        lines.append("=" * 70)
+        lines.append(f"Timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("")
+        
+        # System Info
+        lines.append("-" * 70)
+        lines.append("SYSTEM INFORMATION")
+        lines.append("-" * 70)
+        sys_info = self.get_system_info()
+        for key, value in sys_info.items():
+            lines.append(f"  {key.replace('_', ' ').title()}: {value}")
+        lines.append("")
+        
+        # CPU Results
+        if cpu_result:
+            lines.append("-" * 70)
+            lines.append("CPU BENCHMARK RESULTS")
+            lines.append("-" * 70)
+            lines.append(f"  CPU Model: {cpu_result.cpu_info.get('model_name', 'N/A')}")
+            lines.append(f"  Core Count: {cpu_result.core_count}")
+            lines.append(f"  Resolution: {cpu_result.width}x{cpu_result.height}")
+            lines.append(f"  Max Iterations: {cpu_result.max_iterations}")
+            lines.append(f"  Single-Core Time: {cpu_result.single_core_time:.4f}s")
+            lines.append(f"  Multi-Core Time: {cpu_result.multi_core_time:.4f}s")
+            lines.append(f"  Pixels Per Second: {cpu_result.pixels_per_second:,.0f}")
+            lines.append(f"  Scaling Efficiency: {cpu_result.scaling_efficiency:.2f}%")
+            lines.append(f"  ★ CPU SCORE: {cpu_result.score:,.0f}")
+            lines.append("")
+        
+        # GPU Results
+        if gpu_result:
+            lines.append("-" * 70)
+            lines.append("GPU BENCHMARK RESULTS")
+            lines.append("-" * 70)
+            if gpu_result.success:
+                lines.append(f"  Model: {gpu_result.model_name}")
+                lines.append(f"  GPU: {gpu_result.gpu_info.get('name', 'N/A')}")
+                lines.append(f"  Backend: {gpu_result.backend.upper()}")
+                lines.append(f"  Prompt Tokens: {gpu_result.prompt_tokens}")
+                lines.append(f"  Generated Tokens: {gpu_result.generated_tokens}")
+                lines.append(f"  Total Time: {gpu_result.total_time:.4f}s")
+                lines.append(f"  ★ Tokens/Second: {gpu_result.tokens_per_second:.2f}")
+                lines.append(f"  Memory Used: {gpu_result.memory_used_gb:.2f} GB")
+                lines.append(f"  Memory Total: {gpu_result.memory_total_gb:.2f} GB")
+                lines.append("")
+                lines.append("  Response:")
+                lines.append("  " + "-" * 40)
+                # Wrap response text
+                response_lines = gpu_result.response.split('\n')
+                for resp_line in response_lines:
+                    lines.append(f"    {resp_line}")
+                lines.append("  " + "-" * 40)
+            else:
+                lines.append(f"  Status: FAILED")
+                lines.append(f"  Error: {gpu_result.error_message}")
+            lines.append("")
+        
+        if not cpu_result and not gpu_result:
+            lines.append("No benchmark results available.")
+            lines.append("")
+        
+        lines.append("=" * 70)
+        lines.append("END OF REPORT")
+        lines.append("=" * 70)
+        
+        return "\n".join(lines)
+    
+    def results_to_dict(
+        self,
+        cpu_result: Optional[CPUBenchmarkResult] = None,
+        gpu_result: Optional[GPUBenchmarkResult] = None,
+        timestamp: Optional[datetime] = None
+    ) -> dict:
+        """Convert results to dictionary for JSON export"""
+        if timestamp is None:
+            timestamp = datetime.now()
+        
+        data = {
+            "timestamp": timestamp.isoformat(),
+            "system_info": self.get_system_info(),
+        }
+        
+        if cpu_result:
+            data["cpu_benchmark"] = {
+                "cpu_info": cpu_result.cpu_info,
+                "core_count": cpu_result.core_count,
+                "resolution": {
+                    "width": cpu_result.width,
+                    "height": cpu_result.height
+                },
+                "max_iterations": cpu_result.max_iterations,
+                "single_core_time": cpu_result.single_core_time,
+                "multi_core_time": cpu_result.multi_core_time,
+                "pixels_per_second": cpu_result.pixels_per_second,
+                "scaling_efficiency": cpu_result.scaling_efficiency,
+                "score": cpu_result.score,
+            }
+        
+        if gpu_result:
+            data["gpu_benchmark"] = {
+                "success": gpu_result.success,
+                "model_name": gpu_result.model_name,
+                "gpu_info": gpu_result.gpu_info,
+                "backend": gpu_result.backend,
+                "prompt_tokens": gpu_result.prompt_tokens,
+                "generated_tokens": gpu_result.generated_tokens,
+                "total_time": gpu_result.total_time,
+                "tokens_per_second": gpu_result.tokens_per_second,
+                "memory_used_gb": gpu_result.memory_used_gb,
+                "memory_total_gb": gpu_result.memory_total_gb,
+                "response": gpu_result.response if gpu_result.success else None,
+                "error_message": gpu_result.error_message if not gpu_result.success else None,
+            }
+        
+        return data
+    
+    def save_results(
+        self,
+        cpu_result: Optional[CPUBenchmarkResult] = None,
+        gpu_result: Optional[GPUBenchmarkResult] = None,
+        format: str = "both"  # "text", "json", or "both"
+    ) -> tuple[Optional[Path], Optional[Path]]:
+        """
+        Save results to file(s)
+        
+        Returns:
+            Tuple of (text_file_path, json_file_path) - None if not saved
+        """
+        timestamp = datetime.now()
+        base_filename = f"benchmark_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+        
+        text_path = None
+        json_path = None
+        
+        if format in ("text", "both"):
+            text_path = self.results_dir / f"{base_filename}.txt"
+            text_content = self.format_results_text(cpu_result, gpu_result, timestamp)
+            text_path.write_text(text_content, encoding="utf-8")
+        
+        if format in ("json", "both"):
+            json_path = self.results_dir / f"{base_filename}.json"
+            json_data = self.results_to_dict(cpu_result, gpu_result, timestamp)
+            json_path.write_text(
+                json.dumps(json_data, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+        
+        return text_path, json_path
+    
+    def get_all_results(self) -> list[Path]:
+        """Get list of all saved result files"""
+        results = []
+        if self.results_dir.exists():
+            results = sorted(
+                self.results_dir.glob("benchmark_*.txt"),
+                reverse=True  # Most recent first
+            )
+        return results
+    
+    def load_json_result(self, filepath: Path) -> Optional[dict]:
+        """Load a JSON result file"""
+        try:
+            return json.loads(filepath.read_text(encoding="utf-8"))
+        except Exception:
+            return None
 
 
 class ResultsScreen(ModalScreen):
@@ -476,6 +686,7 @@ class BenchmarkApp(App):
         Binding("c", "run_cpu", "CPU Bench"),
         Binding("g", "run_gpu", "GPU Bench"),
         Binding("r", "show_results", "Results"),
+        Binding("s", "save_results", "Save"),
         Binding("d", "toggle_dark", "Dark Mode"),
     ]
     
@@ -488,6 +699,7 @@ class BenchmarkApp(App):
     def __init__(self):
         super().__init__()
         self.venv_manager = VenvManager()
+        self.results_logger = ResultsLogger()
         self.cpu_result: Optional[CPUBenchmarkResult] = None
         self.gpu_result: Optional[GPUBenchmarkResult] = None
     
@@ -520,10 +732,11 @@ class BenchmarkApp(App):
             
             # Buttons
             with Horizontal(id="button-panel"):
-                yield Button("🔧 Check/Setup Venv", id="venv-button", classes="action-button")
-                yield Button("🖥️ CPU Benchmark", id="cpu-button", classes="action-button")
-                yield Button("🎮 GPU Benchmark", id="gpu-button", classes="action-button")
-                yield Button("📊 View Results", id="results-button", classes="action-button")
+                yield Button("🔧 Setup Venv", id="venv-button", classes="action-button")
+                yield Button("🖥️ CPU Bench", id="cpu-button", classes="action-button")
+                yield Button("🎮 GPU Bench", id="gpu-button", classes="action-button")
+                yield Button("📊 Results", id="results-button", classes="action-button")
+                yield Button("💾 Save", id="save-button", classes="action-button")
             
             # Log Container
             with Container(id="log-container"):
@@ -543,6 +756,8 @@ class BenchmarkApp(App):
         self.log_message("Welcome to System Benchmark!")
         self.log_message("Press 'v' to check/setup virtual environment")
         self.log_message("Press 'c' for CPU benchmark, 'g' for GPU benchmark")
+        self.log_message("Press 's' to save results to file")
+        self.log_message(f"Results directory: {RESULTS_DIR}")
         self.log_message("-" * 50)
     
     def log_message(self, message: str) -> None:
@@ -629,6 +844,8 @@ class BenchmarkApp(App):
             self.action_run_gpu()
         elif button_id == "results-button":
             self.action_show_results()
+        elif button_id == "save-button":
+            self.action_save_results()
     
     def action_check_venv(self) -> None:
         """Check or setup virtual environment"""
@@ -764,6 +981,33 @@ class BenchmarkApp(App):
     def action_show_results(self) -> None:
         """Show results screen"""
         self.push_screen(ResultsScreen(self.cpu_result, self.gpu_result))
+    
+    def action_save_results(self) -> None:
+        """Save results to file"""
+        if self.benchmark_running:
+            self.log_message("⚠️ Cannot save while benchmark is running")
+            return
+        
+        if not self.cpu_result and not self.gpu_result:
+            self.log_message("⚠️ No benchmark results to save. Run a benchmark first!")
+            return
+        
+        try:
+            text_path, json_path = self.results_logger.save_results(
+                cpu_result=self.cpu_result,
+                gpu_result=self.gpu_result,
+                format="both"
+            )
+            
+            self.log_message("✅ Results saved successfully!")
+            if text_path:
+                self.log_message(f"   📄 Text: {text_path.name}")
+            if json_path:
+                self.log_message(f"   📋 JSON: {json_path.name}")
+            self.log_message(f"   📁 Directory: {RESULTS_DIR}")
+            
+        except Exception as e:
+            self.log_message(f"❌ Failed to save results: {e}")
     
     def action_toggle_dark(self) -> None:
         """Toggle dark mode"""
